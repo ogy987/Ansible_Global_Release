@@ -1,0 +1,251 @@
+---
+- hosts: ubuntu
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+  - name: Check the PHP version which is currently installed on the server
+    shell: php --version
+    register: php_version_check
+
+  - name: Show the currently installed PHP version
+    debug: 
+      var: php_version_check.stdout_lines
+
+  - name: If the currently installed PHP version is < 7.2, install PHP version 7.3 with all necessary Packages and Modules
+    when: php_version_check.stdout_lines | regex_search(item)
+    with_items:
+      - "PHP 7.0.*"
+      - "PHP 7.1.*"
+    apt:
+      name: ['php7.3', 'php7.3-cli', 'php7.3-fpm', 'php7.3-common', 'php7.3-redis', 'php7.3-mysql', 'php7.3-apcu', 'php7.3-opcache', 'php7.3-gd', 'php7.3-mbstring', 'php7.3-xml', 'php7.3-curl', 'php7.3-json', 'php7.3-zip']
+    
+  - name: Update Service Facts
+    service_facts:
+
+  - name: Check PHP version - after upgrade
+    shell: php --version
+    register: php_version_upgrade
+
+  - name: Show PHP version - after upgrade
+    debug: 
+      var: php_version_upgrade.stdout_lines
+
+  - name: Check installed PHP 7.3 Modules
+    shell: php -m
+    register: php_modules
+
+  - name: Show installed PHP 7.3 Modules
+    debug: 
+      var: php_modules.stdout_lines
+
+  - name: Check if PHP 7.3 is in running state
+    command: systemctl status php7.3-fpm
+    register: php_status_check
+    ignore_errors: yes
+    no_log: True
+    failed_when: false
+
+  - name: Show the PHP 7.3 state
+    debug: 
+      msg: "{{ansible_facts.services['php7.3-fpm.service'].state}}"
+  
+  - name: If PHP 7.3 service isn't in running state - restart php7.3-fpm service
+    when: '"dead" in php_status_check.stdout'
+    service:
+       name: php7.3-fpm
+       state: restarted
+
+  - name: Check the PHP version which is currently installed on the server
+    shell: php --version
+    register: php_version_check_new
+
+  - name: Replace the line in NGINX config file which refer to php7.0-fpm.sock with new php7.3-fpm.sock module
+    lineinfile: 
+      path: /etc/nginx/sites-available/default
+      backup: yes 
+      regexp: 'fastcgi_pass unix:/run/php/php7.0-fpm.sock;' 
+      line: '                fastcgi_pass unix:/run/php/php7.3-fpm.sock;'
+      backrefs: yes
+    when: php_version_check_new.stdout_lines | regex_search("PHP 7.3.*")
+
+  - name: Replace the line in NGINX config file which refer to php7.1-fpm.sock with new php7.3-fpm.sock module
+    lineinfile: 
+      path: /etc/nginx/sites-available/default
+      backup: yes 
+      regexp: 'fastcgi_pass unix:/run/php/php7.1-fpm.sock;' 
+      line: '                fastcgi_pass unix:/run/php/php7.3-fpm.sock;'
+      backrefs: yes
+    when: php_version_check_new.stdout_lines | regex_search("PHP 7.3.*")
+
+  - name: Check if NGINX configuration syntax is correct after the changes
+    shell: nginx -t
+    register: check_nginx_syntax
+
+  - name: Result of checking NGINX configuration syntax
+    debug: 
+      var: check_nginx_syntax.stderr_lines
+
+  - name: Change templates_c directory ownership permissions to be only open for www-data user
+    shell: cd /home/ubuntu/public_html && sudo find templates_c/ -type d -exec chown www-data:www-data '{}' ';'
+
+  - name: Restart PHP 7.3 service
+    shell: systemctl restart php7.3-fpm
+
+  - name: Restart NGINX service
+    shell: systemctl restart nginx
+
+  - name: Restart Redis service
+    shell: systemctl restart redis
+
+  - name: Clear Redis cache
+    shell: redis-cli flushall
+
+  - name: Update Service Facts
+    service_facts:
+
+  - name: Check if PHP 7.3 is in running state - after restart    
+    shell: systemctl status php7.3-fpm
+    ignore_errors: yes
+
+  - name: Show the PHP 7.3 state - after restart
+    debug: 
+      msg: "{{ansible_facts.services['php7.3-fpm.service'].state}}"
+
+  - name: Check if NGINX is in running state - after restart    
+    shell: systemctl status nginx
+    ignore_errors: yes
+
+  - name: Show the NGINX state - after restart
+    debug: 
+      msg: "{{ansible_facts.services['nginx.service'].state}}"
+
+  - name: Check if Redis is in running state - after restart    
+    shell: systemctl status redis
+    ignore_errors: yes
+
+  - name: Show the Redis state - after restart
+    debug: 
+      msg: "{{ansible_facts.services['redis-server.service'].state}}"
+
+  - name: Check if all background tasks are up and running
+    command: supervisorctl status
+    register: tasks_status_check
+
+  - name: Show the status of the background tasks
+    debug: 
+      var: tasks_status_check.stdout_lines
+
+  - name: Restart all tasks which are in STOPPED, FATAL or STARTING state
+    when: tasks_status_check.stdout_lines | regex_search(item)
+    with_items:
+      - "STOPPED"
+      - "FATAL"
+      - "STARTING"
+    shell: supervisorctl restart all
+
+  - name: Check if all background tasks are up and running - after restart
+    command: supervisorctl status
+    register: restarted_tasks_status_check
+  
+  - name: Show the status of the background tasks
+    debug: 
+      var: restarted_tasks_status_check.stdout_lines
+
+  - name: Add the line in NGINX config file for maintenance on/off mode
+    lineinfile: 
+      path: /etc/nginx/sites-available/default
+      insertafter: 'server {'
+      line: '        set $maintenance on;'
+
+  - name: Add a section in NGINX config which will redirect all the traffic to the maintenance page except DBP VPN IP address
+    blockinfile: 
+      path: /etc/nginx/sites-available/default 
+      backup: yes 
+      insertbefore: 'location / {' 
+      block: |
+           if ($remote_addr ~ (23.23.65.47)) {
+               set $maintenance off;
+           }
+
+           if ($maintenance = on) {
+               return 503;
+           }
+
+           error_page 503 @maintenance;
+
+           location @maintenance {
+               rewrite ^(.*)$ /502.html break;
+           }
+
+  - name: Check if NGINX configuration syntax is correct after the changes
+    shell: nginx -t
+    register: check_maintenance_nginx_syntax
+
+  - name: Result of checking NGINX configuration syntax
+    debug: 
+      var: check_maintenance_nginx_syntax.stderr_lines
+
+  - name: Restart NGINX service to apply the changes
+    shell: systemctl restart nginx
+
+  - name: Restart Redis service
+    shell: systemctl restart redis
+
+  - name: Restart PHP 7.3 service
+    shell: systemctl restart php7.3-fpm
+
+  - name: Clear Redis cache
+    shell: redis-cli flushall
+
+  - name: Update Service Facts
+    service_facts:
+
+  - name: Check if NGINX service is in running state - after restart    
+    shell: systemctl status nginx
+    ignore_errors: yes
+
+  - name: Show the NGINX service state - after restart
+    debug: 
+      msg: "{{ansible_facts.services['nginx.service'].state}}"
+
+  - name: Check if Redis is in running state - after restart    
+    shell: systemctl status redis
+    ignore_errors: yes
+
+  - name: Show the Redis state - after restart
+    debug: 
+      msg: "{{ansible_facts.services['redis-server.service'].state}}"
+
+  - name: Check if PHP 7.3 is in running state - after restart    
+    shell: systemctl status php7.3-fpm
+    ignore_errors: yes
+
+  - name: Show the PHP 7.3 state - after restart
+    debug: 
+      msg: "{{ansible_facts.services['php7.3-fpm.service'].state}}"
+
+  - name: Check if all background tasks are up and running
+    command: supervisorctl status
+    register: tasks_status_check
+
+  - name: Show the status of the background tasks
+    debug: 
+      var: tasks_status_check.stdout_lines
+
+  - name: Restart all tasks which are in STOPPED, FATAL or STARTING state
+    when: tasks_status_check.stdout_lines | regex_search(item)
+    with_items:
+      - "STOPPED"
+      - "FATAL"
+      - "STARTING"
+    shell: supervisorctl restart all
+
+  - name: Check if all background tasks are up and running - after restart
+    command: supervisorctl status
+    register: restarted_tasks_status_check
+  
+  - name: Show the status of the background tasks
+    debug: 
+      var: restarted_tasks_status_check.stdout_lines

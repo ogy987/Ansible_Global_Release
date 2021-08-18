@@ -1,0 +1,23 @@
+---
+- hosts: ubuntu
+  become: yes
+  gather_facts: yes
+
+  tasks:
+  - name: Set maintenance page from on to off mode
+    lineinfile: 
+      path: /etc/nginx/sites-available/default
+      firstmatch: yes 
+      regexp: '(\s+)set \$maintenance on;(\s+.*)?$'
+      line: '        set $maintenance off;'
+
+  - name: Check if NGINX configuration syntax is correct after the changes
+    shell: nginx -t
+    register: check_nginx_syntax
+
+  - name: Result of checking NGINX configuration syntax
+    debug:
+      var: check_nginx_syntax.stderr_lines
+
+  - name: Restart NGINX service
+    shell: systemctl restart nginx

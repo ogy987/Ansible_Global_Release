@@ -1,0 +1,63 @@
+---
+- hosts: ubuntu
+  gather_facts: yes
+
+  tasks:
+
+  - name: Go to html.git directory and check if there's some modified or uncommited files
+    shell: cd /var/www/html.git/ && git status
+    register: git_status_check
+
+  - name: Show the results of the git status command
+    debug:
+      var: git_status_check.stdout_lines
+
+  - name: Pull the DBP Global Release code changes from the GitHub
+    git:
+      dest: /var/www/html.git
+      repo: git@github.com:DeliveryBizPro/deliverybizpro.git
+      key_file: /home/ubuntu/.ssh/id_rsa
+      accept_hostkey: yes
+      update: yes
+
+  - name: Go to html.git directory and check git status after pulling the changes
+    shell: cd /var/www/html.git/ && git status
+    register: git_status_check
+
+  - name: Show the results of the git status command
+    debug:
+      var: git_status_check.stdout_lines
+
+  - name: Restart all the background tasks
+    become: yes
+    shell: supervisorctl stop all && supervisorctl start all
+
+  - name: Update Service Facts
+    service_facts:
+
+  - name: Check if all background tasks are up and running
+    become: yes
+    command: supervisorctl status
+    register: tasks_status_check
+
+  - name: Show the status of the background tasks
+    debug: 
+      var: tasks_status_check.stdout_lines
+
+  - name: Restart all tasks which are in STOPPED, FATAL or STARTING state
+    become: yes
+    when: tasks_status_check.stdout_lines | regex_search(item)
+    with_items:
+      - "STOPPED"
+      - "FATAL"
+      - "STARTING"
+    shell: supervisorctl restart all
+
+  - name: Check if all background tasks are up and running - after restart
+    become: yes
+    command: supervisorctl status
+    register: restarted_tasks_status_check
+  
+  - name: Show the status of the background tasks
+    debug: 
+      var: restarted_tasks_status_check.stdout_lines
